@@ -34,8 +34,9 @@ SEARCH_DIRECTIONS = namedtuple("SEARCH_DIRECTIONS", ("near", "before", "after"))
     "near", "before", "after"
 )
 
+
 class TqdmLoggingHandler(logging.Handler):
-    def __init__ (self, level=logging.NOTSET):
+    def __init__(self, level=logging.NOTSET):
         super(self.__class__, self).__init__(level)
 
     def emit(self, record):
@@ -47,7 +48,6 @@ class TqdmLoggingHandler(logging.Handler):
             raise
         except:
             self.handleError(record)
-
 
 
 def hash_file(path) -> str:
@@ -201,26 +201,23 @@ def dirs_are_identical(a, b):
     logger.debug(f"Diffing {str(a)!r} against {str(b)!r}")
     # Note that we are _not_ doing checksums. This takes forever!
     cmd = [
-            "rsync",
-            # Don't make any changes!
-            "--dry-run",
-            # Come up with list of file changes
-            "--itemize-changes",
-            "--archive",
-            # This is needed since pathlib strips / off the end, and we need
-            # rsync to follow links correctly
-            str(a) + "/",
-            # This is needed since pathlib strips / off the end, and we need
-            # rsync to follow links correctly
-            str(b) + "/",
-        ]
+        "rsync",
+        # Don't make any changes!
+        "--dry-run",
+        # Come up with list of file changes
+        "--itemize-changes",
+        "--archive",
+        # This is needed since pathlib strips / off the end, and we need
+        # rsync to follow links correctly
+        str(a) + "/",
+        # This is needed since pathlib strips / off the end, and we need
+        # rsync to follow links correctly
+        str(b) + "/",
+    ]
 
     logger.debug(f"Executing command: {' '.join(cmd)}")
     rsync = subprocess.Popen(
-        cmd,
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     # Read every line from the rsync command, in real time
     for line in rsync.stdout:
@@ -242,7 +239,7 @@ def print_snapshots(
     quiet=False,
     only_changes=False,
     diff_dirs=False,
-    no_progress=False
+    no_progress=False,
 ) -> None:
     """Print table of known snapshots"""
     if path.is_file():
@@ -353,7 +350,12 @@ def main() -> None:
                 "give --diff-dirs in order to enable directory change detection"
             )
         print_snapshots(
-            args.path, hashed, args.quiet, args.only_changes, args.diff_dirs, args.no_progress
+            args.path,
+            hashed,
+            args.quiet,
+            args.only_changes,
+            args.diff_dirs,
+            args.no_progress,
         )
 
 
