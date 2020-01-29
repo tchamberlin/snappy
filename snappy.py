@@ -5,10 +5,10 @@
 Example usage:
 
 # Show a table of all snapshots for the given file
-$ snapshot_helper.py /path/to/nfs/file --verbose
+$ snappy.py /path/to/nfs/file --verbose
 
 # Show the closest 
-$ snapshot_helper.py /path/to/nfs/file --verbose --target-date "2020 1 1 03:00"
+$ snappy.py /path/to/nfs/file --verbose --target-date "2020 1 1 03:00"
 
 """
 
@@ -22,6 +22,7 @@ import logging
 import operator
 import sys
 import subprocess
+from tqdm import tqdm
 
 from dateutil import parser as dp
 from tabulate import tabulate
@@ -32,6 +33,21 @@ logger = logging.getLogger(__name__)
 SEARCH_DIRECTIONS = namedtuple("SEARCH_DIRECTIONS", ("near", "before", "after"))(
     "near", "before", "after"
 )
+
+class TqdmLoggingHandler(logging.Handler):
+    def __init__ (self, level=logging.NOTSET):
+        super(self.__class__, self).__init__(level)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.write(msg, file=sys.stderr)
+            # self.flush()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except:
+            self.handleError(record)
+
 
 
 def hash_file(path) -> str:
@@ -212,7 +228,7 @@ def dirs_are_identical(a, b):
         # stop the rsync process (we only care about whether the directories
         # differ, not how they differ)
         if len(line) > 0 and line[0] in [">", "<"]:
-            logger.info(f"Change detected; stopping diff: {line}")
+            logger.debug(f"Change detected; stopping diff: {line}")
             rsync.terminate()
             return False
 
@@ -226,6 +242,7 @@ def print_snapshots(
     quiet=False,
     only_changes=False,
     diff_dirs=False,
+    no_progress=False
 ) -> None:
     """Print table of known snapshots"""
     if path.is_file():
@@ -234,7 +251,10 @@ def print_snapshots(
         current_hash_on_disk = None
     table_data = []
     previous_hash = None
-    for snap_path, snap_hash in hashed:
+    # Disable tqdm if we have explicitly turned off progress, OR if we are NOT
+    # diff'ing directories. Directory diffing is the only operation that takes
+    # more than 1 second, so no point in having progress the rest of the time
+    for snap_path, snap_hash in tqdm(hashed, disable=no_progress or not diff_dirs):
         matches_current_hash_on_disk = (
             snap_hash == current_hash_on_disk if current_hash_on_disk else None
         )
@@ -329,11 +349,11 @@ def main() -> None:
         hashed = hash_snapshots(snapshots)
         if not args.path.is_file() and not args.diff_dirs:
             logger.info(
-                f"NOTE: {str(args.path)!r} is a directory, which means change detection "
-                "between snapshots is disabled UNLESS --diff-dirs is given"
+                f"NOTE: Change detection is disabled! {str(args.path)!r} is a directory; "
+                "give --diff-dirs in order to enable directory change detection"
             )
         print_snapshots(
-            args.path, hashed, args.quiet, args.only_changes, args.diff_dirs
+            args.path, hashed, args.quiet, args.only_changes, args.diff_dirs, args.no_progress
         )
 
 
@@ -427,6 +447,11 @@ def parse_args() -> argparse.Namespace:
         help="Enable change detection between snapshots of directories. NOTE: "
         "This can be VERY SLOW.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bar (progress is shown only if --diff-dirs is given)",
+    )
     args = parser.parse_args()
     return args
 
@@ -435,7 +460,7 @@ def init_logging(level):
     """Initialize logging"""
     logging.getLogger().setLevel(level)
     _logger = logging.getLogger(__name__)
-    console_handler = logging.StreamHandler()
+    console_handler = TqdmLoggingHandler()
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     _logger.addHandler(console_handler)
     _logger.setLevel(level)
