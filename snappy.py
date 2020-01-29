@@ -251,7 +251,9 @@ def print_snapshots(
     # Disable tqdm if we have explicitly turned off progress, OR if we are NOT
     # diff'ing directories. Directory diffing is the only operation that takes
     # more than 1 second, so no point in having progress the rest of the time
-    for snap_path, snap_hash in tqdm(hashed, disable=no_progress or not diff_dirs):
+    for snap_path, snap_hash in tqdm(
+        hashed, disable=no_progress or not diff_dirs, unit="snapshot", smoothing=1
+    ):
         matches_current_hash_on_disk = (
             snap_hash == current_hash_on_disk if current_hash_on_disk else None
         )
