@@ -11,7 +11,8 @@ $ snappy.py /path/to/nfs/file --verbose
 $ snappy.py /path/to/nfs/file --verbose --target-date "2020 1 1 03:00"
 
 """
-from collections import namedtuple
+
+from typing import NamedTuple
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple, Optional
@@ -33,10 +34,14 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-_search_directions = ("before", "after", "near")
-SEARCH_DIRECTIONS = namedtuple("SEARCH_DIRECTIONS", _search_directions)(
-    *_search_directions
-)
+
+class SearchDirections(NamedTuple):
+    after: str = "before"
+    before: str = "before"
+    near: str = "before"
+
+
+SEARCH_DIRECTIONS = SearchDirections()
 
 
 class TqdmLoggingHandler(logging.Handler):
