@@ -382,7 +382,7 @@ def restore_from_snapshot(from_path: Path, to_path: Path, dry_run=False) -> None
     print(f"Example restore command:")
     if from_path.resolve().is_dir():
         print(f"  # Make {str(to_path)!r} exactly the same as {str(from_path)!r}")
-        print(f"  $ rsync --archive --delete {str(from_path)!r}/ {str(to_path)!r}")
+        print(f"  $ rsync --archive --delete {str(from_path) + '/'!r} {str(to_path)!r}")
     else:
         print(f"  $ cp {str(from_path)!r} {str(to_path)!r}")
         # logger.debug(f"Copying {from_path} to {to_path}")
@@ -545,7 +545,11 @@ def parse_args() -> argparse.Namespace:
         "Optionally restore from a given snapshot",
         formatter_class=WideHelpFormatter,
     )
-    parser.add_argument("path", type=lambda x: Path(x).expanduser(), help="The path to examine snapshots of")
+    parser.add_argument(
+        "path",
+        type=lambda x: Path(x).expanduser(),
+        help="The path to examine snapshots of",
+    )
 
     selection_group = parser.add_argument_group("selection arguments")
     selection_group.add_argument(
