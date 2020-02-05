@@ -15,23 +15,28 @@ $ snappy.py /path/to/nfs/file --verbose --target-date "2020 1 1 03:00"
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Tuple, Optional
 import argparse
+import csv
 import hashlib
+import io
 import logging
 import operator
-import sys
+import re
+import shutil
 import subprocess
-from tqdm import tqdm
+import sys
 
 from dateutil import parser as dp
 from tabulate import tabulate
+from tqdm import tqdm
 
 
 logger = logging.getLogger(__name__)
 
-SEARCH_DIRECTIONS = namedtuple("SEARCH_DIRECTIONS", ("near", "before", "after"))(
-    "near", "before", "after"
+_search_directions = ("before", "after", "near")
+SEARCH_DIRECTIONS = namedtuple("SEARCH_DIRECTIONS", _search_directions)(
+    *_search_directions
 )
 
 
@@ -51,6 +56,7 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def hash_file(path) -> str:
+    """Compute sha1 hash of file at given path"""
     sha1 = hashlib.sha1()
     with open(path, "rb") as file:
         while True:
@@ -62,9 +68,10 @@ def hash_file(path) -> str:
     return sha1.hexdigest()
 
 
-def format_timedelta(td: timedelta) -> str:
+def abs_timedelta(td: timedelta) -> str:
+    """Format negative timedeltas sensibly"""
     if td < timedelta(0):
-        return "-" + format_timedelta(-td)
+        return "-" + abs_timedelta(-td)
     else:
         # Change this to format positive timedeltas the way you want
         return str(td)
@@ -78,108 +85,151 @@ def get_closest(iterable: Iterable, target):
     return min(iterable, key=lambda item: abs(item - target))
 
 
-def get_snapshots(target_path: Path, snap_dir_name: str) -> Tuple[Iterable, Path]:
+def get_snapshots(
+    target_path: Path, snap_dir_name: str, snap_filter=None
+) -> Tuple[List[Any], int, Any]:
+    """Derive mount path and all snapshots from given path"""
     mount_path = find_mount(target_path)
     snapshot_dir = mount_path / snap_dir_name
     if not snapshot_dir.exists():
         raise ValueError(
-            f"Given path {str(target_path)!r} has no .snapshot directory! Are you "
+            f"Given path {str(target_path)!r} has no {snap_dir_name} directory! Are you "
             "sure it is on NFS (and snapshots are enabled)?"
         )
 
-    return snapshot_dir.iterdir(), mount_path
+    snapshots = list(snapshot_dir.iterdir())
+    total_snapshots = len(snapshots)
+
+    if snap_filter:
+        snapshots = [
+            path for path in snapshots if str(snapshot_dir / snap_filter) in str(path)
+        ]
+    return snapshots, total_snapshots, mount_path
 
 
 def get_closest_snapshot_path(
-    path: Path,
-    search_direction: str,
-    snap_dir_name: str,
-    target_date=None,
-    use_latest_snapshot=None,
-    filter_for_existence=False,
+    snapshots, search_direction: str, target_date: datetime, filter_for_existence=False
 ) -> Optional[Path]:
+    """Return the closest snapshot to the target, or None if there aren't any
+    
+    path: The target path
+    search_direction: Search either before the target, after, or both
+    target_date: If given, this is used as the tareget, and search_direction is
+                 understood to mean temporal proximity
+    filter_for_existence: Filter out snapshots that don't contain the given path
+    """
 
-    if target_date is None and use_latest_snapshot is None:
-        raise ValueError(
-            f"Exactly one of target_date (got {target_date}) or use_latest_snapshot "
-            f"(got {use_latest_snapshot}) must be given"
-        )
     if search_direction not in SEARCH_DIRECTIONS:
         raise AssertionError(f"Unexpected search_direction value: {search_direction}")
 
-    snapshots = parse_snapshots(path, snap_dir_name)
-    if target_date is not None:
-        if search_direction in ["after", "before"]:
-            op = operator.ge if search_direction == "after" else operator.le
-
-            logger.debug(
-                f"Limiting search to only snapshots {search_direction.upper()} target date {target_date}"
-            )
-
-            snapshots = {
-                snapshot_date: snapshot_dir
-                for snapshot_date, snapshot_dir in snapshots.items()
-                if op(snapshot_date, target_date)
-            }
-
-        if filter_for_existence:
-            snapshots = {
-                snapshot_date: full_path
-                for snapshot_date, full_path in snapshots.items()
-                if full_path.exists()
-            }
-        closest = get_closest(snapshots, target_date)
-
-        if closest is None:
-            return None
-        delta = closest - target_date
-        logger.debug(
-            f"Found snapshot taken at {closest} ({format_timedelta(delta)} from target): "
-            f"{str(snapshots[closest])!r}"
-        )
-
-    elif use_latest_snapshot is not None:
-        # Get last date
-        closest = sorted(snapshots.keys())[-1]
-        if closest is None:
-            return None
+    if search_direction in ["after", "before"]:
+        op = operator.ge if search_direction == "after" else operator.le
 
         logger.debug(
-            f"Found snapshot taken at {closest} (most recent snapshot): "
-            f"{str(snapshots[closest])!r}"
+            f"Limiting search to only snapshots {search_direction.upper()} target date {target_date}"
         )
-    else:
-        raise AssertionError("TODO")
+
+        snapshots = {
+            snapshot_date: snapshot_dir
+            for snapshot_date, snapshot_dir in snapshots.items()
+            if op(snapshot_date, target_date)
+        }
+
+    if filter_for_existence:
+        snapshots = {
+            snapshot_date: full_path
+            for snapshot_date, full_path in snapshots.items()
+            if full_path.exists()
+        }
+    closest = get_closest(snapshots, target_date)
+
+    if closest is None:
+        return None
+    delta = closest - target_date
+    logger.debug(
+        f"Found snapshot taken at {closest} ({abs_timedelta(delta)} from target): "
+        f"{str(snapshots[closest])!r}"
+    )
 
     return snapshots[closest]
 
 
 def find_mount(path: Path):
+    """Given a path, derive its mountpoint path"""
     mount_path = path
 
     while not mount_path.is_mount():
         mount_path = mount_path.parent
     logger.debug(f"Found mount for {path}: {mount_path}")
+
     return mount_path
 
 
-def get_date_from_snapshot(snapshot_path: Path):
-    return datetime.strptime(snapshot_path.name.split(".")[1], "%Y-%m-%d_%H%M")
+def get_date_from_snapshot_regex(snapshot_path: Path, snapshot_regex: re.Pattern):
+    """Derive date from snapshot directory name using given regex"""
+    match = snapshot_regex.match(str(snapshot_path))
+    if not match:
+        raise ValueError(
+            f"Failed to parse date from {str(snapshot_path)!r} with "
+            f"given regex {snapshot_regex}"
+        )
+    return datetime(**{key: int(value) for key, value in match.groupdict().items()})
 
 
-def parse_snapshots(target_path: Path, snap_dir_name: str) -> Dict:
-    snapshots, mount_path = get_snapshots(target_path, snap_dir_name)
-    parsed = {
-        get_date_from_snapshot(snapshot_dir): snapshot_dir
-        / str(target_path.absolute())[len(str(mount_path.absolute())) + 1 :]
-        for snapshot_dir in snapshots
-    }
-
-    # logger.debug("These are the snapshots:\n", pformat(parsed))
-    return parsed
+def rebase_path(old_base, new_base, target_path):
+    old_base_length = len(str(old_base.absolute())) + 1
+    # Cut off the mount point from the beginning of the target path...
+    path_without_old_base = str(target_path)[old_base_length:]
+    # ...and replace it with the snapshot directory
+    path_with_new_base = new_base / path_without_old_base
+    logger.debug(f"Rebased {str(target_path)!r} to {str(path_with_new_base)!r}")
+    return path_with_new_base
 
 
-def hash_snapshots(snapshots: Dict[datetime, str]) -> List[Tuple[str, Optional[str]]]:
+def parse_snapshots(
+    target_path: Path,
+    snap_dir_name: str,
+    snap_date_regex: re.Pattern,
+    rebase_links=True,
+    snap_filter=None,
+) -> Tuple[Dict[Any, Any], int]:
+    snapshots, total_snapshots, mount_path = get_snapshots(
+        target_path, snap_dir_name, snap_filter=snap_filter
+    )
+    parsed = {}
+
+    rebase_summary = None
+    for snapshot_dir in snapshots:
+        date = get_date_from_snapshot_regex(snapshot_dir, snap_date_regex)
+        snapshot_path = rebase_path(mount_path, snapshot_dir, target_path)
+        if snap_dir_name not in str(snapshot_path.resolve()):
+            if rebase_links:
+                new_snapshot_path = rebase_path(
+                    mount_path, snapshot_dir, snapshot_path.resolve()
+                )
+                snapshot_path = new_snapshot_path
+                if not rebase_summary:
+                    rebase_summary = Path(
+                        mount_path, snap_dir_name, "**", snapshot_path.name
+                    )
+            else:
+                raise ValueError(
+                    f"Snapshot directory {str(snapshot_path)!r} resolves to a "
+                    f"non-snapshot directory: {str(snapshot_path.resolve())!r}. "
+                    "Raising error due to presence of --no-rebase-snapshot-links"
+                )
+        parsed[date] = snapshot_path
+
+    if rebase_summary:
+        logger.info(
+            f"Snapshots for {str(target_path)!r} contain symlinks to the live filesystem, "
+            f"rebasing {str(target_path)!r} -> {str(rebase_summary)!r}"
+        )
+
+    return parsed, total_snapshots
+
+
+def hash_snapshots(snapshots: Dict[datetime, Path]) -> List[Tuple[Path, Optional[str]]]:
     """Derive SHA1 hashes of all snapshots"""
     hashed = []
     file_hash: Optional[str] = None
@@ -197,7 +247,13 @@ def hash_snapshots(snapshots: Dict[datetime, str]) -> List[Tuple[str, Optional[s
     return hashed
 
 
-def dirs_are_identical(a, b):
+def dirs_are_identical(a: Path, b: Path) -> bool:
+    """Determine whether two directories are identical
+
+    This is based solely on file metadata, not contents. rsync is used
+    to perform the diff. Diff stops on first difference.
+    """
+
     logger.debug(f"Diffing {str(a)!r} against {str(b)!r}")
     # Note that we are _not_ doing checksums. This takes forever!
     cmd = [
@@ -224,58 +280,92 @@ def dirs_are_identical(a, b):
         # If any line starts with a character indicating a change,
         # stop the rsync process (we only care about whether the directories
         # differ, not how they differ)
-        if len(line) > 0 and line[0] in [">", "<"]:
-            logger.debug(f"Change detected; stopping diff: {line}")
+        if line and line[0] in [">", "<"]:
+            logger.debug(f"Stopping diff; change detected: {line!r}")
             rsync.terminate()
             return False
 
+    logger.debug(f"Directories are identical")
     # If there are no differences, then return True: dirs are identical
     return True
 
 
 def print_snapshots(
     path: Path,
-    hashed: List[Tuple[str, Optional[str]]],
-    quiet=False,
+    hashed: List[Tuple[Path, Optional[str]]],
+    total_snapshots: int,
+    csv_output=False,
     only_changes=False,
     diff_dirs=False,
     no_progress=False,
 ) -> None:
-    """Print table of known snapshots"""
+    """Print table of known snapshots. Also derive changes between them."""
+
+    current_hash_on_disk: Optional[str] = None
     if path.is_file():
         current_hash_on_disk = hash_file(path)
     else:
+        # We can only hash files!
         current_hash_on_disk = None
     table_data = []
     previous_hash = None
     # Disable tqdm if we have explicitly turned off progress, OR if we are NOT
     # diff'ing directories. Directory diffing is the only operation that takes
     # more than 1 second, so no point in having progress the rest of the time
-    for snap_path, snap_hash in tqdm(
+    logger.info(f"Calculating changes between {str(path)!r} and snapshots...")
+    progress = tqdm(
         hashed, disable=no_progress or not diff_dirs, unit="snapshot", smoothing=1
-    ):
-        matches_current_hash_on_disk = (
-            snap_hash == current_hash_on_disk if current_hash_on_disk else None
-        )
+    )
+    previous_snap_path = None
+    for snap_path, snap_hash in progress:
+        progress.set_description(snap_path.parent.name)
         if path.is_file():
-            changed = previous_hash != snap_hash if snap_hash else None
+            matches_live_system = (
+                snap_hash == current_hash_on_disk if current_hash_on_disk else None
+            )
         elif diff_dirs:
-            changed = not dirs_are_identical(snap_path, path)
+            matches_live_system = dirs_are_identical(path, snap_path)
         else:
+            matches_live_system = None
+
+        if path.is_file():
+            # A file has changed if its hash is different than the previous hash
+            # If there is no previous hash, then we can't know if the file has changed,
+            # se we indicate none. This should only be the case for the earliest snapshot
+            changed = (
+                previous_hash and previous_hash != snap_hash if snap_hash else None
+            )
+        elif diff_dirs and previous_snap_path:
+            changed = not dirs_are_identical(previous_snap_path, snap_path)
+        else:
+            # If not a file AND we haven't turned on directory diff'ing, then we can't
+            # know whether there has been a change
             changed = None
 
         exists = snap_path.exists()
         if not only_changes or changed:
             table_data.append(
-                (snap_path, exists, snap_hash, matches_current_hash_on_disk, changed)
+                (str(snap_path), exists, snap_hash, matches_live_system, changed)
             )
         previous_hash = snap_hash
-    valid_snapshots = len([__ for __, the_hash in hashed if the_hash])
+        previous_snap_path = snap_path
 
-    if quiet:
-        table = tabulate(table_data, tablefmt="plain")
+    valid_snapshots = len([None for row in table_data if row[1]])
+
+    if csv_output:
+        file = io.StringIO()
+        csvwriter = csv.writer(file)
+        csvwriter.writerows(table_data)
+        table = file.getvalue()
     else:
-        print(f"Found {str(path)!r} in {valid_snapshots}/{len(hashed)} snapshots")
+        total_str = (
+            f" (filtered from {total_snapshots} total)"
+            if total_snapshots != len(hashed)
+            else ""
+        )
+        print(
+            f"Found {str(path)!r} in {valid_snapshots}/{len(hashed)} snapshots{total_str}"
+        )
         table = tabulate(
             table_data, headers=("Path", "Exists", "Hash", "Matches Current", "Changed")
         )
@@ -283,15 +373,17 @@ def print_snapshots(
 
 
 def restore_from_snapshot(from_path: Path, to_path: Path, dry_run=False) -> None:
-    logger.info(f"To restore from snapshot, run:")
-    if from_path.is_dir():
-        print(f"$ rsync -a {from_path} {to_path}")
-    elif from_path.is_file():
-        print(f"$ cp {args}{from_path} {to_path}")
+    """Restore requested path from snapshot"""
+    if not dry_run:
+        logger.info("Snapshot restores are not yet implemented!")
+    print(f"Example restore command:")
+    if from_path.resolve().is_dir():
+        print(f"  # Make {to_path} exactly the same as {from_path}")
+        print(f"  $ rsync --archive --delete {from_path}/ {to_path}")
+    else:
+        print(f"  $ cp {from_path} {to_path}")
         # logger.debug(f"Copying {from_path} to {to_path}")
         # shutil.copy(from_path, to_path)
-    else:
-        raise ValueError("wut")
 
 
 def main() -> None:
@@ -299,21 +391,66 @@ def main() -> None:
     args = parse_args()
     if args.verbose:
         init_logging(logging.DEBUG)
+    elif args.quiet:
+        init_logging(logging.WARNING)
     else:
         init_logging(logging.INFO)
 
-    if not args.path.is_file():
-        logger.debug(f"Given path {str(args.path)!r} is not a file!")
+    if not args.path.exists():
+        logger.error(f"Given path {str(args.path)!r} does not exist!")
+        sys.exit(1)
+
+    if args.path.is_file() and args.diff_dirs:
+        logger.error(f"{str(args.path)!r} is a file; --diff-dirs cannot be used!")
+        sys.exit(1)
+
+    if args.follow_symlink:
+        target_path = args.path.resolve()
+        logger.error(f"Resolved given path {str(args.path)!r} to {str(target_path)!r}")
+        if not target_path.exists():
+            logger.error(f"Resolved path {str(args.path)!r} does not exist!")
+            sys.exit(1)
+    else:
+        target_path = args.path
+        if args.path != args.path.resolve():
+            logger.info(
+                f"{str(args.path)!r} contains a symlink! Resolves to {str(args.path.resolve())!r}. "
+                "Continuing as-is, but consider using --follow-symlink to resolve this before "
+                "processing"
+            )
+
+    try:
+        snapshots, total_snapshots = parse_snapshots(
+            target_path,
+            snap_dir_name=args.snap_dir_name,
+            snap_date_regex=args.snap_date_regex,
+            rebase_links=not args.no_rebase_snapshot_links,
+            snap_filter=args.snapshot_type,
+        )
+    except ValueError as error:
+        if args.verbose:
+            raise
+        logger.error(f"Error: {error}")
+        sys.exit(1)
+
+    if not snapshots:
+        logger.error(
+            f"No snapshots selected for processing (out of {total_snapshots} total)!"
+        )
+        sys.exit(1)
+
+    if len(snapshots) != total_snapshots:
+        logger.info(
+            f"Processing only {len(snapshots)}/{total_snapshots} total snapshots"
+        )
 
     if args.target_date or args.latest:
         try:
             closest_snapshot_path = get_closest_snapshot_path(
-                path=args.path,
+                snapshots=snapshots,
                 target_date=args.target_date,
-                use_latest_snapshot=args.latest,
                 search_direction=args.search_direction,
-                filter_for_existence=not args.no_check_exists,
-                snap_dir_name=args.snap_dir_name,
+                filter_for_existence=args.only_exists,
             )
         except ValueError as error:
             if args.verbose:
@@ -322,8 +459,26 @@ def main() -> None:
             sys.exit(1)
 
         if closest_snapshot_path and closest_snapshot_path.exists():
-            # The final printout
-            print(closest_snapshot_path)
+            if args.quiet:
+                print(closest_snapshot_path)
+            else:
+                if args.search_direction in (
+                    SEARCH_DIRECTIONS.before,
+                    SEARCH_DIRECTIONS.after,
+                ):
+                    first = (
+                        "Newest"
+                        if args.search_direction == SEARCH_DIRECTIONS.before
+                        else "Oldest"
+                    )
+                    verb = args.search_direction
+                else:
+                    first = "Closest"
+                    verb = "to"
+                logger.info(
+                    f"{first} snapshot {verb} {args.target_date} "
+                    f"is {str(closest_snapshot_path)!r}"
+                )
         else:
             proxy_name = "near"
             if args.after:
@@ -335,127 +490,148 @@ def main() -> None:
             sys.exit(1)
 
         if args.restore:
-            restore_from_snapshot(closest_snapshot_path, args.path, args.dry_run)
+            restore_from_snapshot(closest_snapshot_path, target_path, args.dry_run)
     else:
-        try:
-            snapshots = parse_snapshots(args.path, args.snap_dir_name)
-        except ValueError as error:
-            if args.verbose:
-                raise
-            logger.error(f"Error: {error}")
-            sys.exit(1)
-
         hashed = hash_snapshots(snapshots)
-        if not args.path.is_file() and not args.diff_dirs:
+        if not target_path.is_file() and not args.diff_dirs:
             logger.info(
-                f"NOTE: Change detection is disabled! {str(args.path)!r} is a directory; "
-                "give --diff-dirs in order to enable directory change detection"
+                f"NOTE: Change detection is disabled because {str(target_path)!r} is a directory! "
+                "Try again with --diff-dirs in order to enable directory change detection"
             )
+
         print_snapshots(
-            args.path,
-            hashed,
-            args.quiet,
-            args.only_changes,
-            args.diff_dirs,
-            args.no_progress,
+            path=target_path,
+            hashed=hashed,
+            total_snapshots=total_snapshots,
+            csv_output=args.csv,
+            only_changes=args.only_changes,
+            diff_dirs=args.diff_dirs,
+            no_progress=args.no_progress,
         )
+
+
+class WideHelpFormatter(argparse.HelpFormatter):
+    """Formatter that _actually_ fits the console"""
+
+    def __init__(self, *args, **kwargs):
+        # If we can't determine terminal size, just let argparse derive it itself
+        # in the super class
+        width, __ = shutil.get_terminal_size(fallback=(None, None))
+        if width:
+            kwargs["width"] = width
+        super().__init__(*args, **kwargs)
 
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments"""
     parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Locates and describes snapshots ",
+        description="Analyze snapshot history for a given path. "
+        "Optionally restore from a given snapshot",
+        formatter_class=WideHelpFormatter,
     )
     parser.add_argument("path", type=Path, help="The path to examine snapshots of")
 
-    date_group = parser.add_mutually_exclusive_group()
-    date_group.add_argument(
+    selection_group = parser.add_argument_group("selection arguments")
+    selection_group.add_argument(
         "-d",
         "--date",
         dest="target_date",
+        default=datetime.now(),
         type=dp.parse,
-        help="Date to find snapshots closest to",
+        help="Date to find snapshot closest to (default: now)",
     )
-    date_group.add_argument(
-        "--last", dest="latest", action="store_true", help="Select the latest snapshot"
+    selection_group.add_argument(
+        "--only-exists",
+        action="store_true",
+        help="Filter out snapshots that do not include the target path",
     )
-    parser.add_argument(
-        "--no-check-exists", action="store_true", help="Turn off existence checks"
-    )
-    proximity_group = parser.add_mutually_exclusive_group()
-    proximity_group.add_argument(
+    selection_group.add_argument(
         "-s",
         "--search-direction",
         choices=SEARCH_DIRECTIONS,
         default="before",
         help="Indicate the direction (in time) to search for snapshots, from "
-        "the target date",
+        "the target date (default: %(default)s)",
     )
-    proximity_group.add_argument(
-        "--after",
-        action="store_const",
-        const="after",
-        dest="search_direction",
-        help="If given, only snapshots after the target date will be considered",
+    selection_group.add_argument(
+        "-t",
+        "--snapshot-type",
+        help="Indicate the type/granularity of snapshots to query. "
+        "Examples (will vary depending on snapshot setup): weekly, daily, hourly",
     )
-    proximity_group.add_argument(
-        "--before",
-        action="store_const",
-        const="before",
-        dest="search_direction",
-        help="If given, only snapshots before the target date will be considered",
-    )
-    proximity_group.add_argument(
-        "--near",
-        action="store_const",
-        const="near",
-        dest="search_direction",
-        help="If given, only snapshots near the target date will be considered",
-    )
-    parser.add_argument(
-        "-c",
-        "--only-changes",
+    selection_group.add_argument(
+        "--no-rebase-snapshot-links",
         action="store_true",
-        help="Show only snapshots which differ from the previous",
+        help="Typically, snapshot paths that link to non-snapshot paths are rebased "
+        "so that the point to the correct path in the snapshot, instead of the live filesystem. "
+        "Use this to disable that behavior.",
     )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Increase verbosity. This only affects stderr/" "logging output.",
-    )
-    parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Decrease verbosity of stdout (should be suitable for processing via awk, etc.). "
-        "This has no effect on logging output/stderr.",
-    )
-    parser.add_argument(
+
+    action_group = parser.add_argument_group("action arguments")
+    action_group.add_argument(
         "-D", "--dry-run", action="store_true", help="Don't make any changes"
     )
-    parser.add_argument(
-        "--snap-dir-name", help="The name of snapshot directories", default=".snapshot"
-    )
-    # TODO: Currently only prints cp command!
-    parser.add_argument(
+    action_group.add_argument(
         "-r",
         "--restore",
         action="store_true",
         help="Copy the file from snapshot directory to location on disk",
     )
-    parser.add_argument(
+
+    input_group = parser.add_argument_group("input arguments")
+    input_group.add_argument(
+        "--snap-dir-name",
+        help="The name of snapshot directories on your system (default: %(default)s)",
+        default=".snapshot",
+    )
+    input_group.add_argument(
+        "--snap-date-regex",
+        # https://regex101.com/r/ZOSNFQ/1
+        default=r"^.*\w+\.(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})_(?P<hour>\d{2})(?P<minute>\d{2})$",
+        type=re.compile,
+        help="Regular expression for parsing the date from the snapshot name. "
+        "If you need to update this, your regex MUST contain sufficient groups "
+        "to create a datetime from its constructor (default: '%(default)s')",
+    )
+    input_group.add_argument(
+        "-L",
+        "--follow-symlink",
+        action="store_true",
+        help="Fully resolve the given path before processing. "
+        "NOTE: This does NOT resolve any snapshot'd symlinks",
+    )
+    output_group = parser.add_argument_group("output arguments")
+    output_group.add_argument(
         "--diff-dirs",
         action="store_true",
         help="Enable change detection between snapshots of directories. NOTE: "
-        "This can be VERY SLOW.",
+        "This can be VERY SLOW -- diff stops after first difference, but if there "
+        "are no differences then the entire directory trees will be diff'd",
     )
-    parser.add_argument(
+    output_group.add_argument(
+        "-c",
+        "--only-changes",
+        action="store_true",
+        help="Show only snapshots which differ from the previous",
+    )
+    output_group.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Increase verbosity. This only affects stderr/logging output.",
+    )
+    output_group.add_argument(
+        "--csv", action="store_true", help="Output snapshot summary in csv"
+    )
+    output_group.add_argument(
+        "-q", "--quiet", action="store_true", help="Decrease verbosity of logging"
+    )
+    output_group.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable progress bar (progress is shown only if --diff-dirs is given)",
     )
+
     args = parser.parse_args()
     return args
 
@@ -472,3 +648,4 @@ def init_logging(level):
 
 if __name__ == "__main__":
     main()
+#
