@@ -11,7 +11,6 @@ $ snappy.py /path/to/nfs/file --verbose
 $ snappy.py /path/to/nfs/file --verbose --target-date "2020 1 1 03:00"
 
 """
-
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -108,7 +107,10 @@ def get_snapshots(
 
 
 def get_closest_snapshot_path(
-    snapshots, search_direction: str, target_date: datetime, filter_for_existence=False
+    snapshots,
+    search_direction: str,
+    target_date: Optional[datetime],
+    filter_for_existence=True,
 ) -> Optional[Path]:
     """Return the closest snapshot to the target, or None if there aren't any
     
@@ -118,20 +120,22 @@ def get_closest_snapshot_path(
                  understood to mean temporal proximity
     filter_for_existence: Filter out snapshots that don't contain the given path
     """
+    if target_date is None:
+        return snapshots[sorted(snapshots)[-1]]
 
     if search_direction not in SEARCH_DIRECTIONS:
-        raise AssertionError(f"Unexpected search_direction value: {search_direction}")
+        raise ValueError(f"Unexpected search_direction value: {search_direction}")
 
-    if search_direction in ["after", "before"]:
-        op = operator.ge if search_direction == "after" else operator.le
+    if search_direction in [SEARCH_DIRECTIONS.after, SEARCH_DIRECTIONS.before]:
+        op = operator.ge if search_direction == SEARCH_DIRECTIONS.after else operator.le
 
         logger.debug(
             f"Limiting search to only snapshots {search_direction.upper()} target date {target_date}"
         )
 
         snapshots = {
-            snapshot_date: snapshot_dir
-            for snapshot_date, snapshot_dir in snapshots.items()
+            snapshot_date: full_path
+            for snapshot_date, full_path in snapshots.items()
             if op(snapshot_date, target_date)
         }
 
@@ -142,7 +146,6 @@ def get_closest_snapshot_path(
             if full_path.exists()
         }
     closest = get_closest(snapshots, target_date)
-
     if closest is None:
         return None
     delta = closest - target_date
@@ -444,13 +447,17 @@ def main() -> None:
             f"Processing only {len(snapshots)}/{total_snapshots} total snapshots"
         )
 
-    if args.target_date or args.latest:
+    if args.target_date or args.restore:
+        if args.restore and not args.target_date:
+            target_date = None
+        else:
+            target_date = args.target_date
+
         try:
             closest_snapshot_path = get_closest_snapshot_path(
                 snapshots=snapshots,
-                target_date=args.target_date,
+                target_date=target_date,
                 search_direction=args.search_direction,
-                filter_for_existence=args.only_exists,
             )
         except ValueError as error:
             if args.verbose:
@@ -471,22 +478,21 @@ def main() -> None:
                         if args.search_direction == SEARCH_DIRECTIONS.before
                         else "Oldest"
                     )
-                    verb = args.search_direction
+                    verb = f"{args.search_direction} {target_date} "
                 else:
                     first = "Closest"
-                    verb = "to"
+                    verb = f"to {target_date} "
+
+                if target_date is None:
+                    verb = ""
                 logger.info(
-                    f"{first} snapshot {verb} {args.target_date} "
-                    f"is {str(closest_snapshot_path)!r}"
+                    f"{first} snapshot {verb}" f"is {str(closest_snapshot_path)!r}"
                 )
         else:
-            proxy_name = "near"
-            if args.after:
-                proxy_name = "after"
-            elif args.before:
-                proxy_name = "before"
-
-            logger.error(f"Could not find snapshot {proxy_name} " f"{args.target_date}")
+            logger.error(
+                f"Could not find snapshot {args.search_direction} {target_date} "
+                f"containing {str(target_path)!r}"
+            )
             sys.exit(1)
 
         if args.restore:
@@ -522,6 +528,16 @@ class WideHelpFormatter(argparse.HelpFormatter):
         super().__init__(*args, **kwargs)
 
 
+class SelectDatetime(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, "search_direction", self.dest)
+        try:
+            target_date = dp.parse(values)
+        except dp.ParserError as error:
+            parser.error(f"Error parsing --{self.dest}: {error}")
+        setattr(namespace, "target_date", target_date)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments"""
     parser = argparse.ArgumentParser(
@@ -533,29 +549,27 @@ def parse_args() -> argparse.Namespace:
 
     selection_group = parser.add_argument_group("selection arguments")
     selection_group.add_argument(
-        "-d",
-        "--date",
-        dest="target_date",
-        default=datetime.now(),
-        type=dp.parse,
-        help="Date to find snapshot closest to (default: now)",
-    )
-    selection_group.add_argument(
         "--only-exists",
         action="store_true",
         help="Filter out snapshots that do not include the target path",
     )
     selection_group.add_argument(
-        "-s",
-        "--search-direction",
-        choices=SEARCH_DIRECTIONS,
-        default="before",
-        help="Indicate the direction (in time) to search for snapshots, from "
-        "the target date (default: %(default)s)",
+        "--before",
+        "--after",
+        "--near",
+        metavar="DATETIME",
+        action=SelectDatetime,
+        help="Indicates both the direction to search and the date to search for. --after will "
+        "return the newest snapshot occurring after/on the given datetime. --before will return "
+        "the oldest snapshot occurring before/on the given datetime. --near will return "
+        "the closest snapshot to the given datetime, in either direction. Datetimes can be given "
+        "in any reasonable format.",
     )
     selection_group.add_argument(
         "-t",
-        "--snapshot-type",
+        "--type",
+        dest="snapshot_type",
+        metavar="SNAPSHOT_TYPE",
         help="Indicate the type/granularity of snapshots to query. "
         "Examples (will vary depending on snapshot setup): weekly, daily, hourly",
     )
@@ -633,6 +647,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    if args.csv and (args.target_date or args.restore):
+        parser.error("--csv has no effect if not generating a summary!")
+
+    # Need to put this in there ourselves if it hasn't been put in by SelectDatetime
+    if not hasattr(args, "target_date"):
+        setattr(args, "target_date", None)
     return args
 
 
