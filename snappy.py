@@ -381,10 +381,10 @@ def restore_from_snapshot(from_path: Path, to_path: Path, dry_run=False) -> None
         logger.info("Snapshot restores are not yet implemented!")
     print(f"Example restore command:")
     if from_path.resolve().is_dir():
-        print(f"  # Make {to_path} exactly the same as {from_path}")
-        print(f"  $ rsync --archive --delete {from_path}/ {to_path}")
+        print(f"  # Make {str(to_path)!r} exactly the same as {str(from_path)!r}")
+        print(f"  $ rsync --archive --delete {str(from_path)!r}/ {str(to_path)!r}")
     else:
-        print(f"  $ cp {from_path} {to_path}")
+        print(f"  $ cp {str(from_path)!r} {str(to_path)!r}")
         # logger.debug(f"Copying {from_path} to {to_path}")
         # shutil.copy(from_path, to_path)
 
@@ -545,7 +545,7 @@ def parse_args() -> argparse.Namespace:
         "Optionally restore from a given snapshot",
         formatter_class=WideHelpFormatter,
     )
-    parser.add_argument("path", type=Path, help="The path to examine snapshots of")
+    parser.add_argument("path", type=lambda x: Path(x).expanduser(), help="The path to examine snapshots of")
 
     selection_group = parser.add_argument_group("selection arguments")
     selection_group.add_argument(
@@ -653,6 +653,9 @@ def parse_args() -> argparse.Namespace:
     # Need to put this in there ourselves if it hasn't been put in by SelectDatetime
     if not hasattr(args, "target_date"):
         setattr(args, "target_date", None)
+    # Need to put this in there ourselves if it hasn't been put in by SelectDatetime
+    if not hasattr(args, "search_direction"):
+        setattr(args, "search_direction", None)
     return args
 
 
