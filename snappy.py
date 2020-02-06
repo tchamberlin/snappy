@@ -36,9 +36,9 @@ logger = logging.getLogger(__name__)
 
 
 class SearchDirections(NamedTuple):
-    after: str = "before"
+    after: str = "after"
     before: str = "before"
-    near: str = "before"
+    near: str = "near"
 
 
 SEARCH_DIRECTIONS = SearchDirections()
