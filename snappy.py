@@ -351,7 +351,7 @@ def print_snapshots(
             changed = None
 
         exists = snap_path.exists()
-        if not only_changes or changed:
+        if not only_changes or changed or changed is None:
             table_data.append(
                 (str(snap_path), exists, snap_hash, matches_live_system, changed)
             )
