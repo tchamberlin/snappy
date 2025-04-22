@@ -208,7 +208,11 @@ def parse_snapshots(
 
     rebase_summary = None
     for snapshot_dir in snapshots:
-        date = get_date_from_snapshot_regex(snapshot_dir, snap_date_regex)
+        try:
+            date = get_date_from_snapshot_regex(snapshot_dir, snap_date_regex)
+        except ValueError as error:
+            logger.debug(f"Cannot process snapshot {str(snapshot_dir)!r}; skipping")
+            continue
         snapshot_path = rebase_path(mount_path, snapshot_dir, target_path)
         if snap_dir_name not in str(snapshot_path.resolve()):
             if rebase_links:
