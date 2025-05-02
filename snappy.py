@@ -118,7 +118,7 @@ def get_closest_snapshot_path(
     filter_for_existence=True,
 ) -> Optional[Path]:
     """Return the closest snapshot to the target, or None if there aren't any
-    
+
     path: The target path
     search_direction: Search either before the target, after, or both
     target_date: If given, this is used as the tareget, and search_direction is
@@ -409,8 +409,7 @@ def main() -> None:
         init_logging(logging.INFO)
 
     if not args.path.exists():
-        logger.error(f"Given path {str(args.path)!r} does not exist!")
-        sys.exit(1)
+        logger.info(f"Given path {str(args.path)!r} does not exist!")
 
     if args.path.is_file() and args.diff_dirs:
         logger.error(f"{str(args.path)!r} is a file; --diff-dirs cannot be used!")
